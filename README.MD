@@ -12,7 +12,7 @@ A python script to create meta packages and repos easier(*-ish*) for Arch (btw)
 # Config File
 ## Example
 ### config.json
-```json
+```jsonc
 {
     // Declare user variables to use in other places
     // optional
@@ -77,7 +77,7 @@ A python script to create meta packages and repos easier(*-ish*) for Arch (btw)
 }
 ```
 ### example.json
-```json
+```jsonc
 {
     // Default values for packages
     // Got left from early developement but no reason to remove it
