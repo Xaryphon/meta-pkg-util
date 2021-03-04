@@ -4,7 +4,7 @@ A python script to create meta packages and repos easier(*-ish*) for Arch (btw)
 
 # Dependencies
 
-`# pacman -S python python-zstandard python-gnupg`
+`# pacman -S python python-zstandard python-gnupg python-commentjson`
 
 # Usage
 `meta-pkg-util --config <path/to/config.json>`

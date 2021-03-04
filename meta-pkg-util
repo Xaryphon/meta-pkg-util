@@ -7,12 +7,12 @@ import gzip
 from hashlib import sha256, md5
 import tarfile
 import io
-import json
 import tempfile
 import re
 import string
 import base64
 import argparse
+import commentjson as json
 import zstandard as zstd
 import gnupg
 

@@ -1,2 +1,3 @@
 zstandard
 python-gnupg
+commentjson
