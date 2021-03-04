@@ -17,7 +17,7 @@ import zstandard as zstd
 import gnupg
 
 TOOL_NAME = "meta-pkg-util"
-TOOL_VERSION = "0.1.0"
+TOOL_VERSION = "0.2.0"
 
 added_files = []
 
