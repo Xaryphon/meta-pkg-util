@@ -356,10 +356,12 @@ def dict_combine(lower, upper):
             r[k] = v
     return r
 
-def build_repos(now, config: dict, gpg):
+def build_repos(now, config: dict, gpg, cfgdir):
     user_vars = config.get('variables', {})
     repo_defaults = config.get('repository_defaults', {})
     pkg_defaults = config.get('package_defaults', {})
+
+    user_vars['cfgdir'] = cfgdir
 
     for repo in config['repositories']:
         repo_name = repo['name']
@@ -392,7 +394,7 @@ def main():
     with open(args.config, 'r') as json_file:
         config = json.load(json_file)
 
-    build_repos(now, config, gpg)
+    build_repos(now, config, gpg, path.dirname(path.abspath(args.config)))
 
 if __name__ == "__main__":
     main()
