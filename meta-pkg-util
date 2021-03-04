@@ -19,6 +19,8 @@ import gnupg
 TOOL_NAME = "meta-pkg-util"
 TOOL_VERSION = "0.1.0"
 
+added_files = []
+
 def tarinfo(name, size, mtime: datetime, ftype = tarfile.REGTYPE, mode = 0o644):
     info = tarfile.TarInfo(name = name)
     info.size = size
@@ -60,7 +62,7 @@ def pkginfo_to_text(pkginfo):
 
     return '\n'.join([f"{k} = {v}" for (k, v) in PkgInfoIter(pkginfo)])
 
-def makepkg(now, outdir, pkginfo_data, gpg, signkey):
+def makepkg(now, repo, outdir, pkginfo_data, gpg, signkey):
     pkgver = now.strftime("%Y%m%dT%H%M%SZ-1")
     builddate = now.strftime("%s")
 
@@ -91,13 +93,20 @@ def makepkg(now, outdir, pkginfo_data, gpg, signkey):
                     tar.addfile(tarinfo(".MTREE", len(mtree), now), fileobj=file)
         outdata = outfile.getvalue()
 
+    added_files.append(path.join(outdir, outfilename))
     with open(path.join(outdir, outfilename), 'wb') as outfile:
         outfile.write(outdata)
 
     if signkey:
         # pylint: disable=no-member
-        sigdata = gpg().sign(outdata, detach=True, binary=True, keyid=signkey).data
+        sigres = gpg().sign(outdata, detach=True, binary=True, keyid=signkey)
+        sigdata = sigres.data
 
+        if not sigdata:
+            print(f"ERROR package {repo} {pkgname} Failed to sign package: {sigres.status}")
+            raise RuntimeError("sign failed with " + sigres.status)
+
+        added_files.append(path.join(outdir, outfilename + '.sig'))
         with open(path.join(outdir, outfilename + '.sig'), 'wb') as sigfile:
             sigfile.write(sigdata)
 
@@ -150,7 +159,7 @@ def compare_pkginfo_desc(pkginfo, desc):
             av = a.get(ak)
             bv = b.get(bk)
             if not compare_value(av, bv):
-                print(f"comparing ({type(av)}){av} to ({type(bv)}){bv}")
+                #print(f"comparing ({type(av)}){av} to ({type(bv)}){bv}")
                 return False
         return True
     return compare_dict(pkginfo, desc, [
@@ -195,7 +204,50 @@ def parse_pkg_desc(desc: str):
             data[key] = line
     return data
 
+def cleanup(repo, file):
+    def _cleanup(file):
+        try:
+            if path.exists(file):
+                print(f"INFO cleanup {repo} {file}")
+                os.remove(file)
+        except:
+            print(f"WARNING cleanup {repo} {file} Failed")
+
+    _cleanup(file)
+
+def backup(file):
+    if path.exists(file + '.old'):
+        os.remove(file + '.old')
+    os.rename(file, file + '.old')
+
+def restore(file):
+    if path.exists(file):
+        os.remove(file)
+    os.rename(file + '.old', file)
+
 def build_repo(now, name, infile, outdir, pkg_defaults, lvars, gpg, signkey):
+    global added_files
+
+    _cleanup_restore_db = False
+    _cleanup_restore_sig = False
+    def on_error(e):
+        if _cleanup_restore_db:
+            try:
+                restore(dbpath)
+            except:
+                print(f"FATAL repo-db {name} Restoring db failed")
+
+        if _cleanup_restore_sig:
+            try:
+                restore(dbpath + '.sig')
+            except:
+                print(f"FATAL repo-db {name} Restoring db sig failed")
+
+        for f in added_files:
+            cleanup(name, f)
+
+        raise RuntimeError from e
+
     os.makedirs(outdir, exist_ok=True)
     arch = 'any'
     isize = 0 # Install size (not sure if this should be 0 or something a little more just to be safe)
@@ -224,6 +276,7 @@ def build_repo(now, name, infile, outdir, pkg_defaults, lvars, gpg, signkey):
         pkgname = string.Template(pkgname).substitute(lvars)
 
         if pkgname in desired_pkginfos:
+            print(f"ERROR repo-gather {name} Package {pkgname} defined twice.")
             raise RuntimeError(pkgname + " defined twice")
 
         pkginfo = {
@@ -259,37 +312,41 @@ def build_repo(now, name, infile, outdir, pkg_defaults, lvars, gpg, signkey):
 
     if not always_new:
         # zstd stream doesn't support seeking and tarfile wants to seek so we have to use a temp file
-        with tempfile.TemporaryFile('w+b') as tmp_file:
-            with zstd.open(dbpath, "rb") as zst_file:
-                tmp_file.write(zst_file.read())
-            tmp_file.seek(0)
-            with tarfile.open(fileobj=tmp_file, mode='r') as tar:
-                for info in tar:
-                    if not info.isreg():
-                        continue
-                    desc = tar.extractfile(info).read().decode()
-                    pdesc = parse_pkg_desc(desc)
-                    pkgname = pdesc['NAME']
-                    if pkgname in desired_pkginfos:
-                        pkginfo = desired_pkginfos[pkgname]
-                        uptodate = compare_pkginfo_desc(pkginfo, pdesc)
+        try:
+            with tempfile.TemporaryFile('w+b') as tmp_file:
+                with zstd.open(dbpath, "rb") as zst_file:
+                    tmp_file.write(zst_file.read())
+                tmp_file.seek(0)
+                with tarfile.open(fileobj=tmp_file, mode='r') as tar:
+                    for info in tar:
+                        if not info.isreg():
+                            continue
+                        desc = tar.extractfile(info).read().decode()
+                        pdesc = parse_pkg_desc(desc)
+                        pkgname = pdesc['NAME']
+                        if pkgname in desired_pkginfos:
+                            pkginfo = desired_pkginfos[pkgname]
+                            uptodate = compare_pkginfo_desc(pkginfo, pdesc)
 
-                        if uptodate:
-                            fdesc = {}
-                            for (dk, dv) in pdesc.items():
-                                if isinstance(dv, list):
-                                    fdesc[dk] = '\n'.join(dv)
-                                else:
-                                    fdesc[dk] = dv
-                            if pkgname in descs:
-                                raise RuntimeError("We shouldn't be here")
-                            descs[pkgname] = fdesc
+                            if uptodate:
+                                fdesc = {}
+                                for (dk, dv) in pdesc.items():
+                                    if isinstance(dv, list):
+                                        fdesc[dk] = '\n'.join(dv)
+                                    else:
+                                        fdesc[dk] = dv
+                                if pkgname in descs:
+                                    raise RuntimeError("We shouldn't be here")
+                                descs[pkgname] = fdesc
+                            else:
+                                toremove.append(pdesc['FILENAME'])
+                                print(f"INFO repo-misc {name} updating {pkgname}")
+                                pkginfo['_is_updating'] = True
                         else:
                             toremove.append(pdesc['FILENAME'])
-                            print(f"update {pkgname}")
-                            pkginfo['_is_updating'] = True
-                    else:
-                        toremove.append(pdesc['FILENAME'])
+        except Exception as e:
+            print(f"ERROR repo-gather {name} unexpected error occured")
+            raise RuntimeError from e
 
         for (pkgname, pkginfo) in desired_pkginfos.items():
             if not pkgname in descs:
@@ -297,40 +354,80 @@ def build_repo(now, name, infile, outdir, pkg_defaults, lvars, gpg, signkey):
     else:
         add_pkginfos = desired_pkginfos.values()
 
+    # unsafe starts here
+
     for pkginfo in add_pkginfos:
-        pkgname = pkginfo['pkgname']
-        if not pkginfo.get('_is_updating', False):
-            print(f"adding {pkgname}")
-        if pkgname in descs:
-            raise RuntimeError("We shouldn't be here")
-        descs[pkgname] = makepkg(now, outdir, pkginfo, gpg, pkginfo.get('_signkey'))
+        try:
+            pkgname = pkginfo['pkgname']
+            if not pkginfo.get('_is_updating', False):
+                print(f"INFO repo-misc {name} adding {pkgname}")
+            if pkgname in descs:
+                raise RuntimeError("We shouldn't be here")
+            desc = makepkg(now, name, outdir, pkginfo, gpg, pkginfo.get('_signkey'))
+            descs[pkgname] = desc
+        except Exception as e:
+            print(f"ERROR package {name} {pkgname} Failed to create package")
+            on_error(e)
 
     if not len(toremove) and not len(add_pkginfos):
-        print("db update unnecessary")
+        print(f"INFO repo-db {name} update unnecessary")
         return
 
-    with zstd.open(dbpath, "wb") as zst_file:
-        with tarfile.open(fileobj=zst_file, mode='w') as tar:
-            for desc in descs.values():
-                pkg_dir = f"{desc['NAME']}-{desc['VERSION']}"
-                pkg_desc = path.join(pkg_dir, 'desc')
-
-                pkg_desc_data = ''.join([
-                    # Write everything that's not an empty string
-                    f"%{k}%\n{v}\n\n" for (k, v) in desc.items() if not isinstance(v, (str, type(None))) or v
-                ]).encode()
-
-                tar.addfile(tarinfo(pkg_dir, 0, now, ftype=tarfile.DIRTYPE, mode=0o755))
-                with io.BytesIO(pkg_desc_data) as file:
-                    tar.addfile(tarinfo(pkg_desc, len(pkg_desc_data), now), fileobj=file)
+    # Backup db
+    try:
+        if path.exists(dbpath):
+            backup(dbpath)
+            _cleanup_restore_db = True
+    except Exception as e:
+        print(f"ERROR repo-db {name} Backing up db failed")
+        on_error(e)
 
     if signkey:
-        # pylint: disable=no-member
-        with open(dbpath, 'rb') as zst_file:
-            sigdata = gpg().sign_file(zst_file, detach=True, binary=True, keyid=signkey).data
+        try:
+            if path.exists(dbpath + '.sig'):
+                backup(dbpath + '.sig')
+                _cleanup_restore_sig = True
+        except Exception as e:
+            print(f"ERROR repo-db {name} Backing up db sig failed")
+            on_error(e)
 
-        with open(dbpath + '.sig', 'wb') as sigfile:
-            sigfile.write(sigdata)
+    try:
+        with zstd.open(dbpath, "wb") as zst_file:
+            with tarfile.open(fileobj=zst_file, mode='w') as tar:
+                for desc in descs.values():
+                    pkg_dir = f"{desc['NAME']}-{desc['VERSION']}"
+                    pkg_desc = path.join(pkg_dir, 'desc')
+
+                    pkg_desc_data = ''.join([
+                        # Write everything that's not an empty string
+                        f"%{k}%\n{v}\n\n" for (k, v) in desc.items() if not isinstance(v, (str, type(None))) or v
+                    ]).encode()
+
+                    tar.addfile(tarinfo(pkg_dir, 0, now, ftype=tarfile.DIRTYPE, mode=0o755))
+                    with io.BytesIO(pkg_desc_data) as file:
+                        tar.addfile(tarinfo(pkg_desc, len(pkg_desc_data), now), fileobj=file)
+    except Exception as e:
+        print(f"ERROR repo-db {name} Creating of db failed")
+        on_error(e)
+
+    if signkey:
+        print(f"INFO repo-db {name} Signing")
+        try:
+            with open(dbpath, 'rb') as zst_file:
+                sigres = gpg().sign_file(zst_file, detach=True, binary=True, keyid=signkey)
+
+            # pylint: disable=no-member
+            sigdata = sigres.data
+
+            if not sigdata:
+                print(f"ERROR repo-db {name} {pkgname} Failed to sign db: {sigres.status}")
+                raise RuntimeError("sign failed with " + sigres.status)
+
+            with open(dbpath + '.sig', 'wb') as sigfile:
+                sigfile.write(sigdata)
+        except Exception as e:
+            print(f"ERROR repo-db {name} Signing of db failed")
+            on_error(e)
 
     # <repo>.db -> <repo>.db.tar.zst
     # <repo>.files -> <repo>.db.tar.zst
@@ -345,9 +442,11 @@ def build_repo(now, name, infile, outdir, pkg_defaults, lvars, gpg, signkey):
         if not path.exists(dbbase + '.files.sig'):
             os.symlink(name + dbext + '.sig', dbbase + '.files.sig')
 
+    added_files = []
+
     for f in toremove:
-        print(f"rm {f}")
-        os.remove(path.join(outdir, f))
+        cleanup(name, path.join(outdir, f))
+        cleanup(name, path.join(outdir, f + '.sig'))
 
 def dict_combine(lower, upper):
     r = dict(upper)
@@ -362,6 +461,9 @@ def build_repos(now, config: dict, gpg, cfgdir):
     pkg_defaults = config.get('package_defaults', {})
 
     user_vars['cfgdir'] = cfgdir
+
+    for (k, v) in user_vars.items():
+        user_vars[k] = string.Template(v).substitute(user_vars)
 
     for repo in config['repositories']:
         repo_name = repo['name']
