@@ -259,7 +259,7 @@ def build_repo(now, name, infile, outdir, pkg_defaults, lvars, gpg, signkey):
     with open(infile, 'r') as json_file:
         json_data = json.load(json_file)
 
-    default = json_data.get('_default_')
+    default = json_data.get('_default_', {})
 
     # x -> _default_ -> lvars -> y
     def get_value(dic, name, default_value = []):
